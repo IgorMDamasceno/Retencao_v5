@@ -9,6 +9,7 @@ const LINK_ROUTER_TOKEN = '1|crewZvM3pCrHsz9gwWVfzyzQ5IrTk0T7gltREA4d67dc7105';
 const TRAFFIC_TYPES = ['Automação', 'Broadcast', 'Push'];
 const DISTRIBUTION_STATE_SHEET = 'Controle - Distribuição';
 const DISTRIBUTION_CONFIG_SHEET = 'Config - Distribuição';
+const DISTRIBUTION_MINIMUMS_SHEET = 'Config - Distribuição Mínimos';
 const DISTRIBUTION_SCORE_SMOOTHING = 800;
 const DISTRIBUTION_MIN_SESSION_SHARE = 0.01;
 const DISTRIBUTION_MOMENTUM_WEIGHT = 0.15;
@@ -211,6 +212,27 @@ function saveTrafficConfig(payload) {
   return getConfigData();
 }
 
+function saveDistributionMinimumsConfig(payload) {
+  if (!payload) throw new Error('Dados inválidos.');
+  var operation = String(payload.operation || '').trim();
+  var traffic = String(payload.traffic || '').trim();
+  var routeSlug = String(payload.routeSlug || '').trim();
+  var domainId = String(payload.domainId || '').trim();
+  if (!operation) {
+    throw new Error('Informe a operação.');
+  }
+  if (!traffic) {
+    throw new Error('Informe o tráfego.');
+  }
+  if (!routeSlug) {
+    throw new Error('Informe o slug da rota.');
+  }
+  var minimums = sanitizeDistributionMinimumList_(payload.minimums || []);
+  saveDistributionMinimumsConfig_(operation, traffic, routeSlug, domainId, minimums);
+  var stored = getDistributionMinimumsConfig_(operation, traffic, routeSlug, domainId);
+  return { minimums: stored };
+}
+
 function deleteTrafficConfig(id) {
   if (!id) return getConfigData();
   const sheet = ensureTrafficSheet_();
@@ -367,23 +389,32 @@ function getDashboardData(params) {
   const detailed = buildDetailedAnalysis_(filteredRows, hoursInfo, snapshot.revshareMap);
 
   var savedControls = getDistributionControlsConfig_(operationName, trafficType, selectedRouteSlug, selectedRouteDomainId);
+  var savedMinimums = getDistributionMinimumsConfig_(operationName, trafficType, selectedRouteSlug, selectedRouteDomainId);
   var distributionParams = {};
   if (savedControls) {
     Object.keys(savedControls).forEach(function (key) {
       var value = savedControls[key];
-      if (value != null && value !== '') {
+      if (value != null && value !== '' && typeof value !== 'object') {
         distributionParams[key] = value;
       }
     });
   }
+  var minimumsOverride = Array.isArray(savedMinimums) ? savedMinimums.slice() : [];
   if (params.distribution) {
     Object.keys(params.distribution).forEach(function (key) {
       var value = params.distribution[key];
-      if (value != null && value !== '') {
+      if (key === 'urlFixedMinimums') {
+        return;
+      }
+      if (value != null && value !== '' && typeof value !== 'object') {
         distributionParams[key] = value;
       }
     });
+    if (Array.isArray(params.distribution.urlFixedMinimums)) {
+      minimumsOverride = sanitizeDistributionMinimumList_(params.distribution.urlFixedMinimums);
+    }
   }
+  distributionParams.urlFixedMinimums = minimumsOverride;
 
   var distribution;
   if (requiresRouteSelection) {
@@ -399,6 +430,18 @@ function getDashboardData(params) {
 
   if (distribution) {
     distribution.requiresRouteSelection = requiresRouteSelection;
+    if (!distribution.controls) distribution.controls = {};
+    if (!distribution.controls.urlFixedMinimums) {
+      distribution.controls.urlFixedMinimums = minimumsOverride;
+    }
+    if (!distribution.fixedMinimumsInfo) {
+      distribution.fixedMinimumsInfo = {
+        configured: minimumsOverride,
+        matched: [],
+        unmatched: minimumsOverride,
+        appliedShare: 0
+      };
+    }
   }
 
   if (integrationConfig && distribution && routeLinkInfo) {
@@ -1103,6 +1146,281 @@ function getDefaultDistributionControls_() {
   };
 }
 
+function normalizeDistributionMinimumEntry_(entry) {
+  var normalized = { url: '', site: '', share: 0 };
+  if (!entry) {
+    return normalized;
+  }
+  if (entry.url != null) {
+    normalized.url = String(entry.url).trim();
+  } else if (entry.link != null) {
+    normalized.url = String(entry.link).trim();
+  }
+  if (entry.site != null) {
+    normalized.site = String(entry.site).trim();
+  } else if (entry.domain != null) {
+    normalized.site = String(entry.domain).trim();
+  }
+  var share = entry.share;
+  if (share == null && entry.minimumShare != null) share = entry.minimumShare;
+  if (share == null && entry.minShare != null) share = entry.minShare;
+  if (share == null && entry.percent != null) share = entry.percent;
+  if (share == null && entry.percentage != null) share = entry.percentage;
+  if (share == null && entry.sharePercent != null) share = entry.sharePercent;
+  var parsedShare = toNumber_(share);
+  if (parsedShare > 1) {
+    parsedShare = parsedShare / 100;
+  }
+  if (parsedShare < 0 || !isFinite(parsedShare)) {
+    parsedShare = 0;
+  }
+  normalized.share = clamp_(parsedShare, 0, 1);
+  return normalized;
+}
+
+function sanitizeDistributionMinimumList_(minimums) {
+  if (!Array.isArray(minimums)) {
+    return [];
+  }
+  var seen = {};
+  var sanitized = [];
+  minimums.forEach(function (item) {
+    var normalized = normalizeDistributionMinimumEntry_(item);
+    if (!normalized.url || normalized.share <= 0) {
+      return;
+    }
+    var key = (normUrlStrict_(normalized.url) || normalized.url.toLowerCase()) + '\u0000' + (normalized.site || '').toLowerCase();
+    if (seen[key]) {
+      // Keep the largest share for duplicates
+      if (seen[key].share < normalized.share) {
+        seen[key].share = normalized.share;
+      }
+      return;
+    }
+    seen[key] = normalized;
+    sanitized.push(normalized);
+  });
+  return sanitized;
+}
+
+function buildDistributionMinimumIndex_(rows) {
+  var index = {};
+  rows.forEach(function (row) {
+    var candidates = [];
+    if (row.key) {
+      candidates.push(String(row.key).toLowerCase());
+    }
+    if (row.url) {
+      var raw = String(row.url).trim().toLowerCase();
+      if (raw) candidates.push(raw);
+      var normalized = normUrlStrict_((row.url || ''));
+      if (normalized && candidates.indexOf(normalized) === -1) {
+        candidates.push(normalized);
+      }
+    }
+    candidates.forEach(function (key) {
+      if (!key) return;
+      if (!index[key]) index[key] = [];
+      index[key].push(row);
+    });
+  });
+  return index;
+}
+
+function matchDistributionMinimumsToRows_(rows, minimums) {
+  if (!rows || !rows.length) {
+    return { entries: minimums.slice(), matched: [], unmatched: minimums.slice(), appliedShare: 0, map: {} };
+  }
+  var index = buildDistributionMinimumIndex_(rows);
+  var matched = [];
+  var unmatched = [];
+  var map = {};
+  minimums.forEach(function (entry) {
+    var normalizedUrl = normUrlStrict_(entry.url) || '';
+    var rawKey = String(entry.url || '').trim().toLowerCase();
+    var siteKey = entry.site ? String(entry.site).trim().toLowerCase() : '';
+    var candidates = [];
+    if (normalizedUrl && index[normalizedUrl]) {
+      candidates = candidates.concat(index[normalizedUrl]);
+    }
+    if (rawKey && index[rawKey]) {
+      candidates = candidates.concat(index[rawKey]);
+    }
+    if (!candidates.length && entry.url) {
+      var key = String(entry.url).trim().toLowerCase();
+      if (key && index[key]) {
+        candidates = candidates.concat(index[key]);
+      }
+    }
+    if (candidates.length > 1) {
+      var filtered = candidates.filter(function (row) {
+        return siteKey ? String(row.site || '').trim().toLowerCase() === siteKey : true;
+      });
+      if (filtered.length) {
+        candidates = filtered;
+      }
+    }
+    var selected = candidates.length ? candidates[0] : null;
+    if (!selected && siteKey) {
+      var siteCandidates = rows.filter(function (row) {
+        return String(row.site || '').trim().toLowerCase() === siteKey;
+      });
+      if (siteCandidates.length) {
+        selected = siteCandidates[0];
+      }
+    }
+    if (selected) {
+      var key = '';
+      if (selected.key != null) {
+        key = String(selected.key);
+      }
+      if (!key && selected.url != null) {
+        key = String(selected.url);
+      }
+      if (!key) {
+        key = normUrlStrict_(selected.url || '') || '';
+      }
+      if (!key) {
+        unmatched.push(entry);
+        return;
+      }
+      var appliedShare = Math.max(0, entry.share || 0);
+      if (!map[key] || map[key] < appliedShare) {
+        map[key] = appliedShare;
+      }
+      matched.push({
+        url: selected.url,
+        site: selected.site,
+        share: appliedShare,
+        requestedShare: entry.share
+      });
+    } else {
+      unmatched.push(entry);
+    }
+  });
+  var appliedShare = 0;
+  Object.keys(map).forEach(function (key) {
+    appliedShare += map[key] || 0;
+  });
+  return {
+    entries: minimums.slice(),
+    matched: matched,
+    unmatched: unmatched,
+    appliedShare: appliedShare,
+    map: map
+  };
+}
+
+function enforceFixedMinimumAllocations_(allocationMap, betAllocationMap, minimumMap) {
+  if (!minimumMap) return;
+  Object.keys(minimumMap).forEach(function (key) {
+    var target = Math.max(0, minimumMap[key] || 0);
+    if (!isFinite(target) || target <= 0) return;
+    var current = allocationMap[key] || 0;
+    if (current < target) {
+      allocationMap[key] = target;
+    }
+    if (betAllocationMap && betAllocationMap[key] > allocationMap[key]) {
+      betAllocationMap[key] = allocationMap[key];
+    }
+  });
+}
+
+function normalizeAllocationWithMinimums_(allocationMap, betAllocationMap, minimumMap) {
+  var keys = Object.keys(allocationMap);
+  var total = keys.reduce(function (acc, key) {
+    return acc + Math.max(0, allocationMap[key] || 0);
+  }, 0);
+  if (total <= 0) {
+    return;
+  }
+  if (Math.abs(total - 1) <= 1e-6) {
+    return;
+  }
+  if (total < 1) {
+    var scale = 1 / total;
+    keys.forEach(function (key) {
+      allocationMap[key] = (allocationMap[key] || 0) * scale;
+      if (betAllocationMap && betAllocationMap[key]) {
+        betAllocationMap[key] = (betAllocationMap[key] || 0) * scale;
+      }
+    });
+    return;
+  }
+  var excess = total - 1;
+  var reducibleTotal = 0;
+  var reducibleKeys = [];
+  keys.forEach(function (key) {
+    var current = allocationMap[key] || 0;
+    var floor = minimumMap && minimumMap[key] != null ? minimumMap[key] : 0;
+    var available = current - floor;
+    if (available > 1e-9) {
+      reducibleTotal += available;
+      reducibleKeys.push({ key: key, available: available, floor: floor });
+    }
+  });
+  if (reducibleTotal <= 1e-9) {
+    var minimumTotal = 0;
+    if (minimumMap) {
+      Object.keys(minimumMap).forEach(function (key) {
+        minimumTotal += Math.max(0, minimumMap[key] || 0);
+      });
+    }
+    if (minimumTotal > 1) {
+      var minScale = 1 / minimumTotal;
+      Object.keys(minimumMap).forEach(function (key) {
+        var newValue = Math.max(0, minimumMap[key] || 0) * minScale;
+        allocationMap[key] = newValue;
+        if (betAllocationMap && betAllocationMap[key]) {
+          betAllocationMap[key] = Math.min(betAllocationMap[key], newValue);
+        }
+      });
+      keys.forEach(function (key) {
+        if (!minimumMap || minimumMap[key] == null) {
+          allocationMap[key] = 0;
+          if (betAllocationMap) {
+            betAllocationMap[key] = 0;
+          }
+        }
+      });
+      return;
+    }
+    var scale = 1 / total;
+    keys.forEach(function (key) {
+      allocationMap[key] = (allocationMap[key] || 0) * scale;
+      if (betAllocationMap && betAllocationMap[key]) {
+        betAllocationMap[key] = (betAllocationMap[key] || 0) * scale;
+      }
+    });
+    enforceFixedMinimumAllocations_(allocationMap, betAllocationMap, minimumMap);
+    return;
+  }
+  reducibleKeys.forEach(function (item) {
+    var portion = excess * (item.available / reducibleTotal);
+    var current = allocationMap[item.key] || 0;
+    var nextValue = Math.max(item.floor, current - portion);
+    if (nextValue < item.floor) {
+      nextValue = item.floor;
+    }
+    allocationMap[item.key] = nextValue;
+    if (betAllocationMap && betAllocationMap[item.key]) {
+      var betShare = betAllocationMap[item.key];
+      if (betShare > nextValue) {
+        betAllocationMap[item.key] = nextValue;
+      } else if (current > 0) {
+        var ratio = betShare / current;
+        betAllocationMap[item.key] = ratio * nextValue;
+      }
+    }
+  });
+  var updatedTotal = keys.reduce(function (acc, key) {
+    return acc + Math.max(0, allocationMap[key] || 0);
+  }, 0);
+  if (Math.abs(updatedTotal - 1) > 1e-6) {
+    normalizeAllocationWithMinimums_(allocationMap, betAllocationMap, minimumMap);
+  }
+}
+
 function buildDistributionControls_(params) {
   var defaults = getDefaultDistributionControls_();
   var controls = {};
@@ -1455,6 +1773,16 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
     });
   });
 
+  var configuredMinimums = sanitizeDistributionMinimumList_(params && params.urlFixedMinimums ? params.urlFixedMinimums : []);
+  controls.urlFixedMinimums = configuredMinimums;
+  var minimumMatch = matchDistributionMinimumsToRows_(allUrls, configuredMinimums);
+  var fixedMinimumMap = minimumMatch.map || {};
+  var fixedMinimumShare = minimumMatch.appliedShare || 0;
+  allUrls.forEach(function (row) {
+    var mapKey = row.key != null ? String(row.key) : '';
+    row.fixedMinimumShare = fixedMinimumMap.hasOwnProperty(mapKey) ? fixedMinimumMap[mapKey] : 0;
+  });
+
   if (!allUrls.length) {
     return {
       controls: controls,
@@ -1731,6 +2059,8 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
     allocatePortion(betTargets, betShare, betMinShare, allocationMap, betAllocationMap);
   }
 
+  enforceFixedMinimumAllocations_(allocationMap, betAllocationMap, fixedMinimumMap);
+
   var totalAllocated = 0;
   allUrls.forEach(function (row) {
     totalAllocated += allocationMap[row.key] || 0;
@@ -1755,15 +2085,17 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
       totalAllocated = 1;
     }
   }
-  if (totalAllocated > 0 && Math.abs(totalAllocated - 1) > 1e-6) {
-    var scale = 1 / totalAllocated;
-    Object.keys(allocationMap).forEach(function (key) {
-      allocationMap[key] = (allocationMap[key] || 0) * scale;
-    });
-    Object.keys(betAllocationMap).forEach(function (key) {
-      betAllocationMap[key] = (betAllocationMap[key] || 0) * scale;
-    });
-  }
+  enforceFixedMinimumAllocations_(allocationMap, betAllocationMap, fixedMinimumMap);
+  normalizeAllocationWithMinimums_(allocationMap, betAllocationMap, fixedMinimumMap);
+  fixedMinimumShare = 0;
+  Object.keys(fixedMinimumMap).forEach(function (key) {
+    var target = Math.max(0, fixedMinimumMap[key] || 0);
+    if (target <= 0) {
+      return;
+    }
+    var actual = Math.max(0, allocationMap[key] || 0);
+    fixedMinimumShare += Math.min(actual, target);
+  });
 
   var urlsBySite = {};
   var globalAggregates = [];
@@ -1877,7 +2209,18 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
     priorityShareActual: priorityShareAccum,
     betMode: betModeActive,
     betShareActual: betShareAccum,
-    betRecipients: betCount
+    betRecipients: betCount,
+    minimumReservedShare: Math.min(1, fixedMinimumShare),
+    minimumConfiguredCount: configuredMinimums.length,
+    minimumMatchedCount: minimumMatch.matched ? minimumMatch.matched.length : 0,
+    minimumUnmatchedCount: minimumMatch.unmatched ? minimumMatch.unmatched.length : 0
+  };
+
+  var fixedMinimumInfo = {
+    configured: configuredMinimums,
+    matched: minimumMatch.matched || [],
+    unmatched: minimumMatch.unmatched || [],
+    appliedShare: fixedMinimumShare
   };
 
   return {
@@ -1888,7 +2231,8 @@ function buildDistributionPlan_(rows, hoursInfo, revshareMap, params) {
     latestHour: hoursInfo && hoursInfo.latestHourLabel ? hoursInfo.latestHourLabel : '',
     totalSessions: totalSessionsWindow,
     hours: windowHours.map(function (hour) { return hour.label; }),
-    globalUrls: globalSummary
+    globalUrls: globalSummary,
+    fixedMinimumsInfo: fixedMinimumInfo
   };
 }
 
@@ -2383,6 +2727,184 @@ function ensureDistributionConfigSheet_() {
 
   sheet.setFrozenRows(1);
   return sheet;
+}
+
+function ensureDistributionMinimumsSheet_() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName(DISTRIBUTION_MINIMUMS_SHEET);
+  var headers = ['Operação', 'Tráfego', 'Slug Rota', 'Domínio ID', 'URL', 'Site', 'Share Mínimo'];
+  if (!sheet) {
+    sheet = ss.insertSheet(DISTRIBUTION_MINIMUMS_SHEET);
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  var lastCol = Math.max(sheet.getLastColumn(), headers.length);
+  if (sheet.getMaxColumns() < lastCol) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), lastCol - sheet.getMaxColumns());
+  }
+  var currentHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var hasHeaders = currentHeaders.some(function (value) {
+    return !!normalizeKey_(value);
+  });
+  if (!hasHeaders) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  var normalized = {};
+  currentHeaders.forEach(function (value, index) {
+    var key = normalizeKey_(value);
+    if (key && normalized[key] == null) {
+      normalized[key] = index;
+    }
+  });
+  headers.forEach(function (header, index) {
+    var key = normalizeKey_(header);
+    if (normalized.hasOwnProperty(key)) {
+      return;
+    }
+    var targetIndex = -1;
+    for (var i = 0; i < currentHeaders.length; i++) {
+      if (!normalizeKey_(currentHeaders[i])) {
+        targetIndex = i;
+        break;
+      }
+    }
+    if (targetIndex === -1) {
+      targetIndex = currentHeaders.length;
+      currentHeaders.push('');
+      if (sheet.getMaxColumns() < currentHeaders.length) {
+        sheet.insertColumnsAfter(sheet.getMaxColumns(), currentHeaders.length - sheet.getMaxColumns());
+      }
+    }
+    currentHeaders[targetIndex] = header;
+    sheet.getRange(1, targetIndex + 1).setValue(header);
+    normalized[key] = targetIndex;
+  });
+  sheet.setFrozenRows(1);
+  return sheet;
+}
+
+function getDistributionMinimumsConfig_(operation, traffic, route, domainId) {
+  if (!operation || !traffic) {
+    return [];
+  }
+  var sheet = ensureDistributionMinimumsSheet_();
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) {
+    return [];
+  }
+  var values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  var headers = values[0];
+  var idx = getHeaderIndexMap_(headers);
+  var opIdx = idx.operacao;
+  var trafficIdx = idx.trafego;
+  if (opIdx == null || trafficIdx == null) {
+    return [];
+  }
+  var slugIdx = idx.slugrota;
+  var domainIdx = idx.dominioid;
+  var urlIdx = findIndex_(idx, ['url']);
+  var siteIdx = findIndex_(idx, ['site']);
+  var shareIdx = idx.shareminimo;
+  var normalizedOp = String(operation).trim().toLowerCase();
+  var normalizedTraffic = String(traffic).trim().toLowerCase();
+  var normalizedRoute = String(route || '').trim().toLowerCase();
+  var normalizedDomain = String(domainId || '').trim().toLowerCase();
+  var matches = [];
+  var fallbackSlug = [];
+  var fallbackGeneric = [];
+  for (var i = 1; i < values.length; i++) {
+    var row = values[i];
+    if (!row || row.join('').trim() === '') continue;
+    var rowOp = String(row[opIdx] || '').trim().toLowerCase();
+    var rowTraffic = String(row[trafficIdx] || '').trim().toLowerCase();
+    if (rowOp !== normalizedOp || rowTraffic !== normalizedTraffic) {
+      continue;
+    }
+    var rowSlug = slugIdx == null ? '' : String(row[slugIdx] || '').trim().toLowerCase();
+    var rowDomain = domainIdx == null ? '' : String(row[domainIdx] || '').trim().toLowerCase();
+    var slugMatch = normalizedRoute ? rowSlug === normalizedRoute : !rowSlug;
+    var domainMatch = normalizedDomain ? rowDomain === normalizedDomain : !rowDomain;
+    if (slugMatch && domainMatch) {
+      matches.push(row);
+      continue;
+    }
+    if (normalizedRoute && rowSlug === normalizedRoute && !rowDomain) {
+      fallbackSlug.push(row);
+      continue;
+    }
+    if (!normalizedRoute && !rowSlug) {
+      fallbackGeneric.push(row);
+    }
+  }
+  var selectedRows = matches.length ? matches : (fallbackSlug.length ? fallbackSlug : fallbackGeneric);
+  if (!selectedRows.length) {
+    return [];
+  }
+  return selectedRows
+    .map(function (row) {
+      var url = urlIdx != null ? row[urlIdx] : '';
+      var site = siteIdx != null ? row[siteIdx] : '';
+      var shareValue = shareIdx != null ? row[shareIdx] : 0;
+      var normalized = normalizeDistributionMinimumEntry_({ url: url, site: site, share: shareValue });
+      return normalized;
+    })
+    .filter(function (entry) { return entry.url && entry.share > 0; });
+}
+
+function saveDistributionMinimumsConfig_(operation, traffic, route, domainId, minimums) {
+  if (!operation || !traffic) {
+    return;
+  }
+  var sheet = ensureDistributionMinimumsSheet_();
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  var existing = lastRow > 1 ? sheet.getRange(2, 1, lastRow - 1, lastCol).getValues() : [];
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var idx = getHeaderIndexMap_(headers);
+  var opIdx = idx.operacao;
+  var trafficIdx = idx.trafego;
+  var slugIdx = idx.slugrota;
+  var domainIdx = idx.dominioid;
+  var urlIdx = findIndex_(idx, ['url']);
+  var siteIdx = findIndex_(idx, ['site']);
+  var shareIdx = idx.shareminimo;
+  var normalizedOp = String(operation).trim().toLowerCase();
+  var normalizedTraffic = String(traffic).trim().toLowerCase();
+  var normalizedRoute = String(route || '').trim().toLowerCase();
+  var normalizedDomain = String(domainId || '').trim().toLowerCase();
+  var retained = [];
+  existing.forEach(function (row) {
+    var rowOp = opIdx == null ? '' : String(row[opIdx] || '').trim().toLowerCase();
+    var rowTraffic = trafficIdx == null ? '' : String(row[trafficIdx] || '').trim().toLowerCase();
+    var rowSlug = slugIdx == null ? '' : String(row[slugIdx] || '').trim().toLowerCase();
+    var rowDomain = domainIdx == null ? '' : String(row[domainIdx] || '').trim().toLowerCase();
+    if (rowOp === normalizedOp && rowTraffic === normalizedTraffic && rowSlug === normalizedRoute && rowDomain === normalizedDomain) {
+      return;
+    }
+    retained.push(row.slice());
+  });
+  var sanitized = sanitizeDistributionMinimumList_(minimums);
+  sanitized.forEach(function (entry) {
+    var row = new Array(lastCol);
+    row[opIdx != null ? opIdx : 0] = operation;
+    row[trafficIdx != null ? trafficIdx : 1] = traffic;
+    if (slugIdx != null) row[slugIdx] = route || '';
+    if (domainIdx != null) row[domainIdx] = domainId || '';
+    if (urlIdx != null) row[urlIdx] = entry.url || '';
+    if (siteIdx != null) row[siteIdx] = entry.site || '';
+    if (shareIdx != null) row[shareIdx] = entry.share || 0;
+    retained.push(row);
+  });
+  if (lastRow > 1) {
+    sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  }
+  if (retained.length) {
+    sheet.getRange(2, 1, retained.length, lastCol).setValues(retained);
+  }
 }
 
 function getDistributionControlsConfig_(operation, traffic, route, domainId) {

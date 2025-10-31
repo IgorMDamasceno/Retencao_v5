@@ -556,7 +556,8 @@
           selectedSite: '',
           urlSearch: '',
           dirty: false,
-          contextKey: ''
+          contextKey: '',
+          minimums: []
         },
         detailed: {
           mode: 'url',
@@ -3128,6 +3129,11 @@
         });
         card.appendChild(grid);
 
+        var minimumsCard = renderDistributionMinimumsSection(distribution);
+        if (minimumsCard) {
+          card.appendChild(minimumsCard);
+        }
+
         var toggleRow = document.createElement('div');
         toggleRow.className = 'flex flex-wrap items-center justify-between gap-3 text-sm text-slate-300';
         var requireLabel = document.createElement('label');
@@ -3197,6 +3203,238 @@
         card.appendChild(summary);
 
         return card;
+      }
+
+      function renderDistributionMinimumsSection(distribution) {
+        ensureDistributionState();
+        var minimums = getDistributionMinimums();
+        var options = collectDistributionUrlOptions(distribution);
+        var optionLookup = {};
+        options.forEach(function (option) {
+          if (!option || !option.url) return;
+          optionLookup[option.url.toLowerCase()] = option;
+        });
+
+        var datalistId = 'distribution-minimum-url-options';
+        var existingList = document.getElementById(datalistId);
+        if (existingList) {
+          existingList.remove();
+        }
+
+        var container = document.createElement('div');
+        container.className = 'rounded-xl border border-slate-800/70 bg-slate-900/40 p-4 space-y-4';
+
+        var header = document.createElement('div');
+        header.className = 'flex flex-wrap items-center justify-between gap-2';
+        var titleWrap = document.createElement('div');
+        titleWrap.className = 'flex flex-col gap-1';
+        var title = document.createElement('h4');
+        title.className = 'text-sm font-semibold text-slate-200';
+        title.textContent = 'URLs com distribuição mínima garantida';
+        titleWrap.appendChild(title);
+        var hint = document.createElement('p');
+        hint.className = 'text-xs text-slate-400';
+        hint.textContent = 'Reserve uma parcela mínima do tráfego para URLs específicas da rota atual.';
+        titleWrap.appendChild(hint);
+        header.appendChild(titleWrap);
+
+        var addButton = document.createElement('button');
+        addButton.type = 'button';
+        addButton.className = 'inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-700/70 bg-slate-800/70 text-sm text-slate-100 hover:bg-slate-800/90 transition-colors';
+        addButton.innerHTML = '<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>Adicionar URL';
+        addButton.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          if (addDistributionMinimum(options)) {
+            renderAnalysis();
+          }
+        });
+        header.appendChild(addButton);
+        container.appendChild(header);
+
+        var datalist = document.createElement('datalist');
+        datalist.id = datalistId;
+        options.forEach(function (option) {
+          if (!option || !option.url) return;
+          var opt = document.createElement('option');
+          opt.value = option.url;
+          if (option.site) {
+            opt.label = option.site;
+          }
+          datalist.appendChild(opt);
+        });
+        container.appendChild(datalist);
+
+        var listWrapper = document.createElement('div');
+        listWrapper.className = 'space-y-3';
+        if (!minimums.length) {
+          var empty = document.createElement('p');
+          empty.className = 'text-xs text-slate-400';
+          empty.textContent = 'Nenhuma URL configurada. Clique em "Adicionar URL" para garantir participação mínima.';
+          listWrapper.appendChild(empty);
+        } else {
+          minimums.forEach(function (entry, index) {
+            var row = document.createElement('div');
+            row.className = 'flex flex-col md:flex-row md:items-center gap-3 rounded-xl border border-slate-800/70 bg-slate-900/60 p-3';
+
+            var urlWrapper = document.createElement('div');
+            urlWrapper.className = 'flex-1 flex flex-col gap-1';
+            var urlLabel = document.createElement('span');
+            urlLabel.className = 'text-xs uppercase tracking-wide text-slate-400';
+            urlLabel.textContent = 'URL';
+            urlWrapper.appendChild(urlLabel);
+            var urlInput = document.createElement('input');
+            urlInput.type = 'text';
+            urlInput.className = 'pill px-3 py-2 rounded-lg bg-slate-950/60 text-sm text-slate-100';
+            urlInput.placeholder = 'https://exemplo.com/...';
+            urlInput.setAttribute('list', datalistId);
+            urlInput.value = entry.url || '';
+            urlInput.addEventListener('change', function (ev) {
+              var previous = entry.url || '';
+              var value = (ev.target.value || '').trim();
+              if (!value) {
+                if (updateDistributionMinimum(index, { url: '', site: '' })) {
+                  renderAnalysis();
+                }
+                return;
+              }
+              if (hasDistributionMinimumUrl(value, index)) {
+                showToast('Esta URL já possui um percentual mínimo configurado.', 'error');
+                ev.target.value = previous;
+                return;
+              }
+              var match = optionLookup[value.toLowerCase()] || null;
+              var site = match && match.site ? match.site : '';
+              if (updateDistributionMinimum(index, { url: value, site: site })) {
+                renderAnalysis();
+              }
+            });
+            urlWrapper.appendChild(urlInput);
+            var siteInfo = document.createElement('span');
+            siteInfo.className = 'text-xs text-slate-400';
+            siteInfo.textContent = entry.site ? 'Site: ' + entry.site : 'Site: —';
+            urlWrapper.appendChild(siteInfo);
+            row.appendChild(urlWrapper);
+
+            var shareWrapper = document.createElement('div');
+            shareWrapper.className = 'flex flex-col gap-1 w-full md:w-36';
+            var shareLabel = document.createElement('span');
+            shareLabel.className = 'text-xs uppercase tracking-wide text-slate-400';
+            shareLabel.textContent = 'Percentual mínimo (%)';
+            shareWrapper.appendChild(shareLabel);
+            var shareInput = document.createElement('input');
+            shareInput.type = 'number';
+            shareInput.step = '0.1';
+            shareInput.min = '0';
+            shareInput.max = '100';
+            shareInput.className = 'pill px-3 py-2 rounded-lg bg-slate-950/60 text-sm text-slate-100 text-right';
+            var percentValue = Number(entry.share || 0) * 100;
+            shareInput.value = percentValue ? percentValue.toFixed(2) : '0.00';
+            shareInput.addEventListener('change', function (ev) {
+              var raw = parseFloat(ev.target.value);
+              if (isNaN(raw)) raw = 0;
+              if (raw < 0) raw = 0;
+              if (raw > 100) raw = 100;
+              var formatted = raw.toFixed(2);
+              ev.target.value = formatted;
+              var decimal = Math.round((raw / 100) * 1e6) / 1e6;
+              if (updateDistributionMinimum(index, { share: decimal })) {
+                renderAnalysis();
+              }
+            });
+            shareWrapper.appendChild(shareInput);
+            row.appendChild(shareWrapper);
+
+            var actions = document.createElement('div');
+            actions.className = 'flex items-center md:items-start md:flex-col gap-2';
+            var removeButton = document.createElement('button');
+            removeButton.type = 'button';
+            removeButton.className = 'inline-flex items-center gap-1 text-xs text-rose-300 hover:text-rose-200 px-2 py-1 rounded-lg hover:bg-rose-500/10 transition-colors';
+            removeButton.innerHTML = '<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>Remover';
+            removeButton.addEventListener('click', function (ev) {
+              ev.preventDefault();
+              if (removeDistributionMinimum(index)) {
+                renderAnalysis();
+              }
+            });
+            actions.appendChild(removeButton);
+            row.appendChild(actions);
+
+            listWrapper.appendChild(row);
+          });
+        }
+        container.appendChild(listWrapper);
+
+        var totalShare = minimums.reduce(function (acc, entry) {
+          if (!entry || !entry.url) return acc;
+          var share = Number(entry.share || 0);
+          if (isNaN(share)) return acc;
+          return acc + share;
+        }, 0);
+
+        var summaryRow = document.createElement('div');
+        summaryRow.className = 'flex flex-wrap items-center justify-between gap-2 text-xs';
+        var totalEl = document.createElement('span');
+        totalEl.className = 'text-slate-300';
+        totalEl.textContent = 'Total mínimo reservado: ' + formatShare(totalShare || 0);
+        summaryRow.appendChild(totalEl);
+        if (totalShare > 1) {
+          var warning = document.createElement('span');
+          warning.className = 'text-amber-300';
+          warning.textContent = 'A soma ultrapassa 100% do tráfego disponível. Ajuste os percentuais.';
+          summaryRow.appendChild(warning);
+        } else {
+          var info = document.createElement('span');
+          info.className = 'text-slate-400';
+          info.textContent = 'O sistema ainda pode alocar mais tráfego conforme o desempenho das URLs.';
+          summaryRow.appendChild(info);
+        }
+        container.appendChild(summaryRow);
+
+        if (distribution && distribution.fixedMinimumsInfo) {
+          var infoBlock = document.createElement('div');
+          infoBlock.className = 'text-xs text-slate-400 space-y-1';
+          var appliedShare = Number(distribution.fixedMinimumsInfo.appliedShare || 0);
+          if (appliedShare > 0) {
+            var appliedEl = document.createElement('p');
+            appliedEl.textContent = 'Plano atual reserva ao menos ' + formatShare(appliedShare) + ' antes de aplicar as demais regras.';
+            infoBlock.appendChild(appliedEl);
+          }
+          var unmatched = Array.isArray(distribution.fixedMinimumsInfo.unmatched)
+            ? distribution.fixedMinimumsInfo.unmatched.filter(function (item) { return item && item.url; })
+            : [];
+          if (unmatched.length) {
+            var preview = unmatched.slice(0, 3).map(function (item) {
+              var parts = [item.url];
+              if (item.share != null) {
+                parts.push(formatShare(item.share));
+              }
+              return parts.join(' • ');
+            }).join(', ');
+            var extraCount = unmatched.length - Math.min(unmatched.length, 3);
+            var unmatchedEl = document.createElement('p');
+            unmatchedEl.className = 'text-amber-200';
+            unmatchedEl.textContent = 'URLs sem correspondência nos dados recentes: ' + preview + (extraCount > 0 ? ' +' + extraCount + ' outras' : '');
+            infoBlock.appendChild(unmatchedEl);
+          }
+          if (infoBlock.childElementCount) {
+            container.appendChild(infoBlock);
+          }
+        }
+
+        var actionsRow = document.createElement('div');
+        actionsRow.className = 'flex justify-end';
+        var saveButton = document.createElement('button');
+        saveButton.type = 'button';
+        saveButton.className = 'mt-2 inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold px-4 py-2 rounded-lg shadow-lg shadow-sky-900/40 transition-colors';
+        saveButton.innerHTML = '<svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>Salvar percentuais mínimos';
+        saveButton.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          salvarDistribuicaoMinimos();
+        });
+        actionsRow.appendChild(saveButton);
+        container.appendChild(actionsRow);
+
+        return container;
       }
 
       function renderDistributionMissingUrlsCard(distribution) {
@@ -3753,10 +3991,297 @@
         return 0;
       }
 
-      function updateDistributionParam(key, value) {
+      function ensureDistributionState() {
         if (!state.distribution) {
-          state.distribution = { params: {}, selectedSite: '', urlSearch: '', dirty: false };
+          state.distribution = { params: null, selectedSite: '', urlSearch: '', dirty: false, contextKey: '', minimums: [] };
+          return;
         }
+        if (!('params' in state.distribution)) {
+          state.distribution.params = null;
+        }
+        if (!('selectedSite' in state.distribution)) {
+          state.distribution.selectedSite = '';
+        }
+        if (!('urlSearch' in state.distribution)) {
+          state.distribution.urlSearch = '';
+        }
+        if (!('dirty' in state.distribution)) {
+          state.distribution.dirty = false;
+        }
+        if (!('contextKey' in state.distribution)) {
+          state.distribution.contextKey = '';
+        }
+        if (!Array.isArray(state.distribution.minimums)) {
+          state.distribution.minimums = [];
+        }
+      }
+
+      function normalizeDistributionMinimum(entry) {
+        var normalized = { url: '', share: 0, site: '' };
+        if (!entry) {
+          return normalized;
+        }
+        if (typeof entry.url === 'string') {
+          normalized.url = entry.url.trim();
+        } else if (typeof entry.link === 'string') {
+          normalized.url = entry.link.trim();
+        }
+        var shareValue = entry.share;
+        if (shareValue == null && entry.minShare != null) shareValue = entry.minShare;
+        if (shareValue == null && entry.minimumShare != null) shareValue = entry.minimumShare;
+        if (shareValue == null && entry.percent != null) shareValue = entry.percent;
+        if (shareValue == null && entry.percentage != null) shareValue = entry.percentage;
+        if (shareValue == null && entry.sharePercent != null) {
+          var percentCandidate = Number(entry.sharePercent);
+          if (!isNaN(percentCandidate)) {
+            shareValue = percentCandidate > 1 ? percentCandidate / 100 : percentCandidate;
+          }
+        }
+        var parsedShare = Number(shareValue);
+        if (!isNaN(parsedShare) && isFinite(parsedShare)) {
+          if (parsedShare > 1 && parsedShare <= 100) {
+            normalized.share = parsedShare / 100;
+          } else {
+            normalized.share = parsedShare;
+          }
+          if (normalized.share < 0) {
+            normalized.share = 0;
+          }
+        }
+        if (typeof entry.site === 'string') {
+          normalized.site = entry.site;
+        } else if (typeof entry.domain === 'string') {
+          normalized.site = entry.domain;
+        }
+        return normalized;
+      }
+
+      function distributionMinimumsEqual(a, b) {
+        if (!Array.isArray(a) || !Array.isArray(b)) {
+          return Array.isArray(a) === Array.isArray(b);
+        }
+        if (a.length !== b.length) {
+          return false;
+        }
+        for (var i = 0; i < a.length; i++) {
+          var left = a[i] || {};
+          var right = b[i] || {};
+          var leftUrl = (left.url || '').trim();
+          var rightUrl = (right.url || '').trim();
+          if (leftUrl !== rightUrl) {
+            return false;
+          }
+          var leftShare = Number(left.share || 0);
+          var rightShare = Number(right.share || 0);
+          if (Math.abs(leftShare - rightShare) > 1e-6) {
+            return false;
+          }
+          if ((left.site || '') !== (right.site || '')) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      function getDistributionMinimums() {
+        ensureDistributionState();
+        return state.distribution.minimums;
+      }
+
+      function setDistributionMinimums(minimums, options) {
+        ensureDistributionState();
+        var sanitized = Array.isArray(minimums)
+          ? minimums.map(function (item) {
+              return normalizeDistributionMinimum(item);
+            })
+          : [];
+        var current = state.distribution.minimums || [];
+        var changed = !distributionMinimumsEqual(current, sanitized);
+        if (changed || !Array.isArray(current)) {
+          state.distribution.minimums = sanitized;
+        }
+        if (changed && (!options || options.markDirty !== false)) {
+          state.distribution.dirty = true;
+        }
+        return changed;
+      }
+
+      function addDistributionMinimum(options) {
+        var current = getDistributionMinimums().slice();
+        var defaultUrl = '';
+        var defaultSite = '';
+        if (Array.isArray(options) && options.length) {
+          var used = {};
+          current.forEach(function (entry) {
+            var existingUrl = (entry && entry.url ? entry.url : '').trim().toLowerCase();
+            if (existingUrl) {
+              used[existingUrl] = true;
+            }
+          });
+          for (var i = 0; i < options.length; i++) {
+            var option = options[i];
+            var optionUrl = (option && option.url ? option.url : '').trim();
+            if (!optionUrl) continue;
+            var normalized = optionUrl.toLowerCase();
+            if (!used[normalized]) {
+              defaultUrl = optionUrl;
+              defaultSite = option && option.site ? option.site : '';
+              break;
+            }
+          }
+        }
+        current.push(normalizeDistributionMinimum({ url: defaultUrl, share: 0.02, site: defaultSite }));
+        return setDistributionMinimums(current);
+      }
+
+      function updateDistributionMinimum(index, changes) {
+        var current = getDistributionMinimums();
+        if (!current || index < 0 || index >= current.length) {
+          return false;
+        }
+        var next = current.slice();
+        next[index] = normalizeDistributionMinimum(Object.assign({}, next[index], changes || {}));
+        return setDistributionMinimums(next);
+      }
+
+      function removeDistributionMinimum(index) {
+        var current = getDistributionMinimums();
+        if (!current || index < 0 || index >= current.length) {
+          return false;
+        }
+        var next = current.slice();
+        next.splice(index, 1);
+        return setDistributionMinimums(next);
+      }
+
+      function hasDistributionMinimumUrl(url, ignoreIndex) {
+        var normalized = String(url || '').trim().toLowerCase();
+        if (!normalized) return false;
+        var list = getDistributionMinimums();
+        for (var i = 0; i < list.length; i++) {
+          if (i === ignoreIndex) continue;
+          var entry = list[i];
+          if (!entry) continue;
+          if (String(entry.url || '').trim().toLowerCase() === normalized) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function collectDistributionUrlOptions(distribution) {
+        var optionsMap = {};
+        var addOption = function (url, site) {
+          if (!url) return;
+          var trimmed = String(url).trim();
+          if (!trimmed) return;
+          var key = trimmed.toLowerCase();
+          if (!optionsMap[key]) {
+            optionsMap[key] = { url: trimmed, site: site || '' };
+          } else if (!optionsMap[key].site && site) {
+            optionsMap[key].site = site;
+          }
+        };
+        if (distribution) {
+          if (distribution.urlsBySite) {
+            Object.keys(distribution.urlsBySite).forEach(function (site) {
+              var rows = distribution.urlsBySite[site] || [];
+              rows.forEach(function (row) {
+                addOption(row && row.url, row && (row.site || site));
+              });
+            });
+          }
+          if (distribution.globalUrls) {
+            var summary = distribution.globalUrls;
+            var pools = [];
+            if (Array.isArray(summary.entries)) pools = pools.concat(summary.entries);
+            if (Array.isArray(summary.all)) pools = pools.concat(summary.all);
+            pools.forEach(function (row) {
+              addOption(row && row.url, row && row.site);
+            });
+          }
+          if (Array.isArray(distribution.missingRouteLinks)) {
+            distribution.missingRouteLinks.forEach(function (item) {
+              if (typeof item === 'string') {
+                addOption(item, '');
+              } else if (item && typeof item.url === 'string') {
+                addOption(item.url, item.site || '');
+              }
+            });
+          }
+        }
+        getDistributionMinimums().forEach(function (entry) {
+          if (!entry) return;
+          addOption(entry.url, entry.site);
+        });
+        return Object.keys(optionsMap)
+          .map(function (key) {
+            return optionsMap[key];
+          })
+          .sort(function (a, b) {
+            return a.url.localeCompare(b.url);
+          });
+      }
+
+      function extractDistributionMinimums(distribution) {
+        if (!distribution) return [];
+        var controls = distribution.controls || {};
+        var candidate = null;
+        var keys = ['urlFixedMinimums', 'urlGuaranteedMinimums', 'urlMinimums'];
+        for (var i = 0; i < keys.length; i++) {
+          var key = keys[i];
+          if (controls && typeof controls[key] !== 'undefined') {
+            candidate = controls[key];
+            break;
+          }
+          if (typeof distribution[key] !== 'undefined') {
+            candidate = distribution[key];
+          }
+        }
+        if (candidate == null) {
+          return [];
+        }
+        if (typeof candidate === 'string') {
+          try {
+            candidate = JSON.parse(candidate);
+          } catch (error) {
+            console.warn('Não foi possível interpretar os mínimos de URL retornados pela distribuição.', error);
+            candidate = [];
+          }
+        }
+        if (!Array.isArray(candidate)) {
+          return [];
+        }
+        return candidate
+          .map(function (item) {
+            var url = item && typeof item.url === 'string' ? item.url : item && typeof item.link === 'string' ? item.link : '';
+            var site = item && typeof item.site === 'string' ? item.site : item && typeof item.domain === 'string' ? item.domain : '';
+            var shareValue = item
+              ? item.share != null
+                ? item.share
+                : item.minShare != null
+                ? item.minShare
+                : item.minimumShare != null
+                ? item.minimumShare
+                : item.percent != null
+                ? item.percent
+                : item.percentage
+              : 0;
+            if (shareValue == null && item && item.sharePercent != null) {
+              var percentCandidate = Number(item.sharePercent);
+              if (!isNaN(percentCandidate)) {
+                shareValue = percentCandidate > 1 ? percentCandidate / 100 : percentCandidate;
+              }
+            }
+            return normalizeDistributionMinimum({ url: url, share: shareValue, site: site });
+          })
+          .filter(function (entry) {
+            return entry.url;
+          });
+      }
+
+      function updateDistributionParam(key, value) {
+        ensureDistributionState();
         if (!state.distribution.params) {
           state.distribution.params = {};
         }
@@ -3767,7 +4292,8 @@
       }
 
       function getDistributionPayload() {
-        if (!state.distribution || !state.distribution.params) return null;
+        ensureDistributionState();
+        if (!state.distribution.params) return null;
         var currentKey = makeDistributionContextKey(state.filters.operation, state.filters.traffic, state.filters.route);
         if (!state.distribution.contextKey || state.distribution.contextKey !== currentKey) {
           return null;
@@ -3775,22 +4301,53 @@
         var payload = {};
         Object.keys(state.distribution.params).forEach(function (key) {
           var value = state.distribution.params[key];
-          if (value != null && value !== '') {
-            payload[key] = Number(value);
+          if (value == null || value === '' || typeof value === 'object') {
+            return;
+          }
+          var numeric = Number(value);
+          if (!isNaN(numeric)) {
+            payload[key] = numeric;
           }
         });
+        var minimums = getDistributionMinimums()
+          .filter(function (entry) {
+            return entry && entry.url;
+          })
+          .map(function (entry) {
+            var share = Number(entry.share || 0);
+            if (share < 0) share = 0;
+            var normalized = { url: entry.url, share: share };
+            if (entry.site) {
+              normalized.site = entry.site;
+            }
+            return normalized;
+          })
+          .filter(function (entry) {
+            return entry.share > 0;
+          });
+        if (minimums.length) {
+          payload.urlFixedMinimums = minimums;
+        }
         return payload;
       }
 
       function syncDistributionState(distribution, force, contextKey) {
-        if (!state.distribution) {
-          state.distribution = { params: null, selectedSite: '', urlSearch: '', dirty: false, contextKey: '' };
-        }
-        if (distribution && distribution.controls && (force || !state.distribution.dirty)) {
-          state.distribution.params = Object.assign({}, distribution.controls);
+        ensureDistributionState();
+        var shouldHydrate = force || !state.distribution.dirty;
+        if (distribution && distribution.controls && shouldHydrate) {
+          var controlsCopy = Object.assign({}, distribution.controls);
+          delete controlsCopy.urlFixedMinimums;
+          delete controlsCopy.urlGuaranteedMinimums;
+          delete controlsCopy.urlMinimums;
+          state.distribution.params = controlsCopy;
           state.distribution.dirty = false;
         } else if (!state.distribution.params) {
           state.distribution.params = {};
+        }
+        if (shouldHydrate) {
+          setDistributionMinimums(extractDistributionMinimums(distribution), { markDirty: false });
+        } else if (!Array.isArray(state.distribution.minimums)) {
+          state.distribution.minimums = [];
         }
         if (typeof contextKey !== 'undefined') {
           state.distribution.contextKey = contextKey || '';
@@ -3851,6 +4408,65 @@
             endDate: state.filters.endDate,
             urlWindow: state.filters.window,
             distribution: getDistributionPayload()
+          });
+      }
+
+      function salvarDistribuicaoMinimos() {
+        ensureDistributionState();
+        if (!state.filters.operation || !state.filters.traffic) {
+          showToast('Selecione operação e tráfego antes de salvar os percentuais mínimos.', 'error');
+          return;
+        }
+        var routeKey = state.filters.route || '';
+        var slug = getRouteSlugFromKey(routeKey);
+        var domainId = getRouteDomainIdFromKey(routeKey);
+        if (!slug) {
+          showToast('Selecione o slug da rota para salvar os percentuais mínimos.', 'error');
+          return;
+        }
+        var minimums = getDistributionMinimums()
+          .filter(function (entry) {
+            return entry && entry.url;
+          })
+          .map(function (entry) {
+            var share = Number(entry.share || 0);
+            if (share < 0) share = 0;
+            if (share > 1) share = 1;
+            return {
+              url: (entry.url || '').trim(),
+              site: entry.site || '',
+              share: share
+            };
+          })
+          .filter(function (entry) {
+            return entry.url && entry.share > 0;
+          });
+        var totalShare = minimums.reduce(function (acc, item) {
+          return acc + (item.share || 0);
+        }, 0);
+        if (totalShare > 1 + 1e-6) {
+          showToast('A soma dos percentuais mínimos ultrapassa 100% do tráfego disponível. Ajuste antes de salvar.', 'error');
+          return;
+        }
+        showLoading(true);
+        google.script.run
+          .withSuccessHandler(function (result) {
+            showLoading(false);
+            var stored = (result && result.minimums) || [];
+            setDistributionMinimums(stored, { markDirty: false });
+            showToast('Percentuais mínimos salvos.', 'success');
+            recalcularDistribuicao();
+          })
+          .withFailureHandler(function (error) {
+            showLoading(false);
+            handleError(error);
+          })
+          .saveDistributionMinimumsConfig({
+            operation: state.filters.operation,
+            traffic: state.filters.traffic,
+            routeSlug: slug,
+            domainId: domainId,
+            minimums: minimums
           });
       }
 
