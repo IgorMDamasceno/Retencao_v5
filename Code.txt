@@ -611,25 +611,32 @@ function getHourTimeline_(rows) {
       allHours: [],
       windowHours: [],
       latestHour: null,
-      latestHourLabel: ''
+      latestHourLabel: '',
+      cutoffHour: null
     };
   }
   var latestHour = list[list.length - 1];
+  var latestDate = new Date(latestHour);
+  var todayStart = startOfDay_(new Date()).getTime();
+  var latestDayStart = startOfDay_(latestDate).getTime();
+  var cutoffHour = latestDayStart >= todayStart ? latestHour : null;
   var hourMs = 60 * 60 * 1000;
+  var windowOffsets = cutoffHour == null ? [2, 1, 0] : [3, 2, 1];
   var windowHours = [];
-  for (var offset = 3; offset >= 1; offset--) {
+  windowOffsets.forEach(function (offset) {
     var stamp = latestHour - offset * hourMs;
     windowHours.push({
       key: stamp,
       label: formatHourFromTimestamp_(stamp),
       hasData: !!unique[stamp]
     });
-  }
+  });
   return {
     allHours: list,
     windowHours: windowHours,
     latestHour: latestHour,
-    latestHourLabel: formatHourFromTimestamp_(latestHour)
+    latestHourLabel: formatHourFromTimestamp_(latestHour),
+    cutoffHour: cutoffHour
   };
 }
 
@@ -734,18 +741,21 @@ function filterRowsForWindow_(rows, hoursInfo, window) {
   if (!rows.length) return [];
   var latestHour = hoursInfo.latestHour;
   if (!latestHour) return [];
+  var cutoffHour = hoursInfo && hoursInfo.cutoffHour != null ? hoursInfo.cutoffHour : null;
   var filtered = [];
   var lowerBound;
   var includeDayOnly = false;
+  var hourMs = 60 * 60 * 1000;
+  var upperBound = cutoffHour != null ? cutoffHour : (latestHour + hourMs);
   if (window === 'last6h') {
-    lowerBound = latestHour - 6 * 3600000;
+    lowerBound = upperBound - 6 * hourMs;
   } else if (window === 'last3h') {
-    lowerBound = latestHour - 3 * 3600000;
+    lowerBound = upperBound - 3 * hourMs;
   } else {
     includeDayOnly = true;
   }
   rows.forEach(function (row) {
-    if (row.timestamp >= latestHour) return;
+    if (cutoffHour != null && row.timestamp >= cutoffHour) return;
     if (includeDayOnly) {
       var latestDate = new Date(latestHour);
       var rowDate = row.date;
@@ -756,7 +766,7 @@ function filterRowsForWindow_(rows, hoursInfo, window) {
       }
       return;
     }
-    if (row.timestamp > lowerBound && row.timestamp < latestHour) {
+    if (row.timestamp > lowerBound && row.timestamp < upperBound) {
       filtered.push(row);
     }
   });
@@ -866,10 +876,11 @@ function buildDetailedAnalysis_(rows, hoursInfo, revshareMap) {
   }
   var allHours = hoursInfo && hoursInfo.allHours ? hoursInfo.allHours.slice() : [];
   var latestHour = hoursInfo && hoursInfo.latestHour != null ? hoursInfo.latestHour : null;
+  var cutoffHour = hoursInfo && hoursInfo.cutoffHour != null ? hoursInfo.cutoffHour : null;
   var hourList = [];
   var hourSet = {};
   allHours.forEach(function (timestamp) {
-    if (latestHour != null && timestamp >= latestHour) {
+    if (cutoffHour != null && timestamp >= cutoffHour) {
       return;
     }
     hourList.push(timestamp);
@@ -894,7 +905,7 @@ function buildDetailedAnalysis_(rows, hoursInfo, revshareMap) {
   var urlMap = {};
 
   rows.forEach(function (row) {
-    if (latestHour != null && row.timestamp >= latestHour) return;
+    if (cutoffHour != null && row.timestamp >= cutoffHour) return;
     if (!hourSet[row.timestamp]) return;
     var revshare = toNumber_(revshareMap[row.site] || 0) / 100;
     var adjustedRevenue = row.revenue * (1 - revshare);
