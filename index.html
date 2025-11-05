@@ -125,6 +125,11 @@
     }
     .searchable-select-wrapper {
       position: relative;
+      z-index: 1;
+    }
+    .searchable-select-wrapper.searchable-open,
+    .searchable-select-wrapper:focus-within {
+      z-index: 50;
     }
     .searchable-select-icon {
       position: absolute;
@@ -664,6 +669,7 @@
         input.setAttribute('autocomplete', 'off');
         input.removeAttribute('list');
 
+        var wrapper = input.closest('.searchable-select-wrapper');
         var dropdown = ensureSearchableDropdown(input);
         control.dropdown = dropdown;
 
@@ -703,6 +709,9 @@
           dropdown.classList.remove('show');
           control.isOpen = false;
           control.highlightIndex = -1;
+          if (wrapper) {
+            wrapper.classList.remove('searchable-open');
+          }
         };
 
         var renderOptions = function (filterValue, keepHighlight) {
@@ -725,9 +734,15 @@
               dropdown.appendChild(empty);
               dropdown.classList.add('show');
               control.isOpen = true;
+              if (wrapper) {
+                wrapper.classList.add('searchable-open');
+              }
             } else {
               dropdown.classList.remove('show');
               control.isOpen = false;
+              if (wrapper) {
+                wrapper.classList.remove('searchable-open');
+              }
             }
             return;
           }
@@ -735,6 +750,9 @@
           if (!shouldOpen) {
             dropdown.classList.remove('show');
             control.isOpen = false;
+            if (wrapper) {
+              wrapper.classList.remove('searchable-open');
+            }
             return;
           }
 
@@ -755,6 +773,9 @@
 
           dropdown.classList.add('show');
           control.isOpen = true;
+          if (wrapper) {
+            wrapper.classList.add('searchable-open');
+          }
           if (!keepHighlight || control.highlightIndex < 0 || control.highlightIndex >= control.filteredOptions.length) {
             control.highlightIndex = 0;
           }
